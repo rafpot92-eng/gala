@@ -1,0 +1,20 @@
+resources:
+
+  jobs:
+
+    meczyki_hourly_ingestion:
+
+      name: meczyki-hourly-ingestion
+
+      schedule:
+        quartz_cron_expression: "0 0 * * * ?"
+        timezone_id: "Europe/Warsaw"
+
+      tasks:
+
+        - task_key: ingest
+
+          notebook_task:
+            notebook_path: ../notebooks/01_ingest
+
+          existing_cluster_id: ${var.cluster_id}

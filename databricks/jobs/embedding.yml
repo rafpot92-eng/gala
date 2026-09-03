@@ -1,0 +1,16 @@
+resources:
+
+  jobs:
+
+    meczyki_embeddings:
+
+      name: meczyki-embeddings
+
+      tasks:
+
+        - task_key: embed
+
+          notebook_task:
+            notebook_path: ../notebooks/02_embed
+
+          existing_cluster_id: ${var.cluster_id}

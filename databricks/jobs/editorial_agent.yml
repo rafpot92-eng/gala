@@ -1,0 +1,36 @@
+resources:
+
+  jobs:
+
+    meczyki-editorial-agent:
+
+      name: meczyki-editorial-agent
+
+      parameters:
+
+        - name: topic
+          default: ""
+
+        - name: category
+          default: "Piłka nożna"
+
+        - name: desired_length
+          default: "700"
+
+      tasks:
+
+        - task_key: editorial_agent
+
+          notebook_task:
+
+            notebook_path: ../notebooks/03_editorial_agent
+
+            base_parameters:
+
+              topic: "{{job.parameters.topic}}"
+
+              category: "{{job.parameters.category}}"
+
+              desired_length: "{{job.parameters.desired_length}}"
+
+          existing_cluster_id: ${var.cluster_id}

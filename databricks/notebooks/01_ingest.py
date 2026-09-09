@@ -78,17 +78,33 @@ print(
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 import re
 import time
+from pathlib import Path
 from urllib.parse import (
     urljoin,
     urlparse,
     urlunparse,
 )
 
+import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
+
+
+ARCHIVE_DIR = Path(
+    os.environ.get(
+        "ARCHIVE_DIR",
+        "data/archive",
+    )
+)
+
+ARCHIVE_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
 
 
 BASE_URL = "https://www.meczyki.pl"
@@ -280,15 +296,23 @@ article_urls = article_urls[
 # COMMAND ----------
 
 import os
+from urllib.parse import quote_plus
 import psycopg
 
 
-DATABASE_URL = (
-    dbutils.secrets.get(
-        scope="meczyki",
-        key="lakebase_database_url",
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    pg = {k: os.environ.get(k) for k in ("PGHOST", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGPORT", "PGSSLMODE")}
+    if pg["PGHOST"] and pg["PGUSER"] and pg["PGDATABASE"]:
+        DATABASE_URL = (
+            f"postgresql://{quote_plus(pg['PGUSER'])}:{quote_plus(pg['PGPASSWORD'] or '')}@{pg['PGHOST']}"
+            f":{pg.get('PGPORT') or 5432}/{pg['PGDATABASE']}"
+            f"?sslmode={pg.get('PGSSLMODE') or 'prefer'}"
+        )
+if not DATABASE_URL:
+    raise RuntimeError(
+        "No DB connection. Set DATABASE_URL or PGHOST/PGUSER/PGDATABASE in env."
     )
-)
 
 
 def get_existing_urls(urls):
@@ -418,72 +442,106 @@ def parse_article(url: str):
     if og_image:
         image_url = og_image.get("content")
 
+    # Published date — prefer JSON-LD datePublished,
+    # fall back to <time>.
     published_at = None
 
-    time_element = soup.find(
-        "time"
+    date_match = re.search(
+        r'"datePublished"\s*:\s*"([^"]+)"',
+        response.text,
     )
 
-    if time_element:
-
-        raw_date = (
-            time_element.get(
-                "datetime"
-            )
-            or time_element.get_text(
-                strip=True
-            )
-        )
+    if date_match:
 
         try:
-            published_at = (
-                date_parser.parse(
-                    raw_date
-                )
-                .astimezone(timezone.utc)
-            )
+            published_at = date_parser.parse(
+                date_match.group(1)
+            ).astimezone(timezone.utc)
 
         except Exception:
             published_at = None
 
-    # Prefer semantic article containers.
-    article = soup.find(
-        "article"
-    )
+    if not published_at:
 
-    if not article:
-
-        article = soup.find(
-            "main"
+        time_element = soup.find(
+            "time"
         )
 
-    if not article:
+        if time_element:
 
-        article = soup.body
+            raw_date = (
+                time_element.get(
+                    "datetime"
+                )
+                or time_element.get_text(
+                    strip=True
+                )
+            )
 
+            try:
+                published_at = (
+                    date_parser.parse(
+                        raw_date
+                    )
+                    .astimezone(timezone.utc)
+                )
+
+            except Exception:
+                published_at = None
+
+    # Meczyki renders the article body in .news-text-body
+    # divs, not <p> tags. Prefer those, then fall back to
+    # any <p> in the semantic container.
     paragraphs = []
 
-    if article:
+    body = soup.find(
+        "div",
+        class_="news-text-body",
+    )
 
-        for paragraph in article.find_all(
-            "p"
+    if body:
+
+        for block in body.find_all(
+            recursive=False
         ):
 
             text = clean_text(
-                paragraph.get_text(
+                block.get_text(
                     " ",
                     strip=True,
                 )
             )
 
-            if not text:
-                continue
-
-            # Avoid tiny navigation fragments.
-            if len(text) < 40:
+            if not text or len(text) < 40:
                 continue
 
             paragraphs.append(text)
+
+    if not paragraphs:
+
+        article = (
+            soup.find("article")
+            or soup.find("main")
+            or soup.body
+        )
+
+        if article:
+
+            for paragraph in article.find_all(
+                "p"
+            ):
+
+                text = clean_text(
+                    paragraph.get_text(
+                        " ",
+                        strip=True,
+                    )
+                )
+
+                if not text or len(text) < 40:
+                    continue
+
+                paragraphs.append(text)
 
     content = "\n\n".join(
         paragraphs
@@ -711,6 +769,89 @@ with psycopg.connect(
 print(
     f"Lakebase upserted "
     f"{len(parsed_articles)} articles."
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Parquet archive
+# MAGIC
+# MAGIC Daily raw archive on disk for offline use.
+
+# COMMAND ----------
+
+def write_parquet(articles):
+
+    if not articles:
+
+        return
+
+    today = datetime.now(
+        timezone.utc
+    ).strftime("%Y-%m-%d")
+
+    source = articles[0][
+        "source_name"
+    ]
+
+    out_dir = ARCHIVE_DIR / source
+
+    out_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    out_path = out_dir / (
+        f"{today}.parquet"
+    )
+
+    rows = [
+        {
+            "canonical_url": a["canonical_url"],
+            "source_name": a["source_name"],
+            "title": a["title"],
+            "description": a["description"],
+            "image_url": a["image_url"],
+            "published_at": a["published_at"],
+            "content": a["content"],
+            "content_hash": a["content_hash"],
+            "ingested_at": datetime.now(timezone.utc),
+        }
+        for a in articles
+    ]
+
+    df = pd.DataFrame(rows)
+
+    if out_path.exists():
+
+        existing = pd.read_parquet(
+            out_path
+        )
+
+        df = pd.concat(
+            [existing, df],
+            ignore_index=True,
+        )
+
+        df.drop_duplicates(
+            subset=["canonical_url"],
+            keep="last",
+            inplace=True,
+        )
+
+    df.to_parquet(
+        out_path,
+        index=False,
+    )
+
+    print(
+        f"Parquet: wrote {len(df)} "
+        f"rows to {out_path}"
+    )
+
+
+write_parquet(
+    parsed_articles
 )
 
 # COMMAND ----------

@@ -48,15 +48,25 @@ if not query:
 
 # COMMAND ----------
 
+import os
+from urllib.parse import quote_plus
+
 import psycopg
 
 
-DATABASE_URL = (
-    dbutils.secrets.get(
-        scope="meczyki",
-        key="lakebase_database_url",
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    pg = {k: os.environ.get(k) for k in ("PGHOST", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGPORT", "PGSSLMODE")}
+    if pg["PGHOST"] and pg["PGUSER"] and pg["PGDATABASE"]:
+        DATABASE_URL = (
+            f"postgresql://{quote_plus(pg['PGUSER'])}:{quote_plus(pg['PGPASSWORD'] or '')}@{pg['PGHOST']}"
+            f":{pg.get('PGPORT') or 5432}/{pg['PGDATABASE']}"
+            f"?sslmode={pg.get('PGSSLMODE') or 'prefer'}"
+        )
+if not DATABASE_URL:
+    raise RuntimeError(
+        "No DB connection. Set DATABASE_URL or PGHOST/PGUSER/PGDATABASE in env."
     )
-)
 
 # COMMAND ----------
 

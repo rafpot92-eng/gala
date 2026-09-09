@@ -1,4 +1,4 @@
-.PHONY: setup backend frontend dev test db-init ingest \
+.PHONY: setup backend frontend dev test db-init \
         databricks-validate databricks-deploy
 
 setup:
@@ -20,7 +20,8 @@ db-init:
 	./scripts/db-init.sh
 
 ingest:
-	uv run --directory backend python scripts/ingest.py
+	@echo "Ingestion runs in Databricks notebook 01_ingest.py (see databricks/jobs/hourly_ingestion.yml)"
+	@echo "Local ad-hoc run not supported; use the Databricks hourly job."
 
 databricks-validate:
 	./scripts/databricks-deploy.sh validate

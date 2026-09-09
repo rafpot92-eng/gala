@@ -1,3 +1,7 @@
+from contextlib import contextmanager
+
+import psycopg
+
 from pydantic_settings import BaseSettings
 
 
@@ -15,3 +19,9 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+@contextmanager
+def get_connection():
+    with psycopg.connect(settings.database_url) as conn:
+        yield conn

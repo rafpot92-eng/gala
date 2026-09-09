@@ -86,36 +86,16 @@ The production database should be initialized using the controlled deployment/mi
 
 # 5. Backend setup
 
-```bash
-cd backend
-
-python -m venv .venv
-```
-
-Activate the environment.
-
-Linux/macOS:
+Dependencies are managed with `uv` from the repo root `pyproject.toml`.
 
 ```bash
-source .venv/bin/activate
-```
-
-Windows:
-
-```powershell
-.venv\Scripts\activate
-```
-
-Install dependencies:
-
-```bash
-pip install -r requirements.txt
+uv sync
 ```
 
 Start FastAPI:
 
 ```bash
-uvicorn app.main:app --reload --port 8000
+uv run --directory backend uvicorn app.main:app --reload --port 8000
 ```
 
 Test:

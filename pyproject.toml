@@ -1,10 +1,31 @@
 [project]
 name = "gala"
 version = "0.1.0"
-description = "Add your description here"
+description = "Meczyki editorial platform backend"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "authlib>=1.4.1",
+    "beautifulsoup4>=4.0.0",
+    "fastapi>=0.115.6",
+    "httpx>=0.28.1",
+    "itsdangerous>=2.2.0",
+    "lxml>=5.0.0",
+    "pandas>=3.0.5",
+    "psycopg[binary]>=3.3.5",
+    "pyarrow>=15.0.0",
+    "pydantic>=2.10.4",
+    "pydantic-settings>=2.7.1",
+    "PyJWT>=2.10.1",
+    "python-dateutil>=2.9.0",
+    "requests>=2.34.2",
+    "uvicorn[standard]>=0.34.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
 
 [project.scripts]
 gala = "gala:main"

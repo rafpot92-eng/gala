@@ -5,31 +5,17 @@ set -e
 echo "== Meczyki Editorial setup =="
 
 echo "Checking Python..."
-python3 --version
+uv run python --version
 
 echo "Checking Node..."
 node --version
 
-echo "Installing backend..."
-
-cd backend
-
-python3 -m venv .venv
-
-source .venv/bin/activate
-
-pip install --upgrade pip
-
-pip install -r requirements.txt
-
-cd ..
+echo "Installing backend (uv)..."
+uv sync
 
 echo "Installing frontend..."
-
 cd frontend
-
 npm install
-
 cd ..
 
 echo

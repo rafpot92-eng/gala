@@ -4,13 +4,9 @@ set -e
 
 echo "Backend tests"
 
-cd backend
+uv run --directory backend python -m pytest
 
-source .venv/bin/activate
-
-python -m pytest
-
-cd ../frontend
+cd frontend
 
 echo "Frontend production build"
 

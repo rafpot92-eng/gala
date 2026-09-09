@@ -15,19 +15,20 @@ make frontend       # frontend only: cd frontend && npm run dev
 make test           # backend pytest + frontend production build
 ```
 
-Single backend tests: `cd backend && source .venv/bin/activate && python -m pytest`
+Single backend tests: `uv run --directory backend python -m pytest`
 Frontend build check: `cd frontend && npm run build`
 Frontend lint: `cd frontend && npm run lint`
 
 ## Project layout
 
-- `backend/` — FastAPI app (psycopg3, pydantic-settings, authlib, PyJWT)
+- `backend/` — FastAPI app (psycopg3, pydantic-settings, authlib, PyJWT) — deps in root `pyproject.toml`, managed with `uv`
 - `frontend/` — Next.js 15 / React 19 / TypeScript app
 - `databricks/` — notebooks (01_ingest, 02_embed, 03_editorial_agent, 04_search) + job YAMLs + `src/` business logic
 - `database/` — SQL schema, indexes, seed data (run in order: 001 → 002 → 003)
 - `config/` — environment YAML files (development.yml, staging.yml, production.yml)
 - `scripts/` — shell scripts wrapping common tasks
 - `src/gala/` — package placeholder (not yet populated)
+- `pyproject.toml` — single source for backend deps (`uv sync` creates root `.venv`)
 
 ## Critical workflow rules
 
@@ -49,7 +50,7 @@ Copy `.env.example` to `.env`. Key vars: `DATABASE_URL`, `JWT_SECRET`, `DATABRIC
 
 ## Gotchas
 
-- `scripts/dev.sh` re-runs full setup (venv + pip install + npm install) every time — use `make dev` or start backend/frontend manually
+- `scripts/dev.sh` re-runs full setup (uv sync + npm install) every time — use `make dev` or start backend/frontend manually
 - Backend reads `.env` from project root via pydantic-settings
 - Frontend connects to backend via `NEXT_PUBLIC_API_URL` — set this or it defaults to localhost:8000
 - `scripts/test.sh` runs both backend tests AND frontend production build

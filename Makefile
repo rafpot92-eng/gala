@@ -1,12 +1,11 @@
-.PHONY: setup backend frontend dev test db-init \
+.PHONY: setup backend frontend dev test db-init ingest \
         databricks-validate databricks-deploy
 
 setup:
 	./scripts/setup.sh
 
 backend:
-	cd backend && \
-	uvicorn app.main:app --reload --port 8000
+	uv run --directory backend uvicorn app.main:app --reload --port 8000
 
 frontend:
 	cd frontend && npm run dev
@@ -19,6 +18,9 @@ test:
 
 db-init:
 	./scripts/db-init.sh
+
+ingest:
+	uv run --directory backend python scripts/ingest.py
 
 databricks-validate:
 	./scripts/databricks-deploy.sh validate

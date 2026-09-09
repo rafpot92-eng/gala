@@ -101,9 +101,15 @@ if not DATABASE_URL:
             f":{pg.get('PGPORT') or 5432}/{pg['PGDATABASE']}"
             f"?sslmode={pg.get('PGSSLMODE') or 'prefer'}"
         )
+if not DATABASE_URL and "dbutils" in globals():
+    DATABASE_URL = dbutils.secrets.get(
+        scope="meczyki",
+        key="lakebase_database_url",
+    )
 if not DATABASE_URL:
     raise RuntimeError(
-        "No DB connection. Set DATABASE_URL or PGHOST/PGUSER/PGDATABASE in env."
+        "No DB connection. Set DATABASE_URL, PGHOST/PGUSER/PGDATABASE, "
+        "or the meczyki/lakebase_database_url secret."
     )
 
 # COMMAND ----------

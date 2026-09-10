@@ -31,7 +31,7 @@ DATABRICKS_TOKEN_URL = (
 )
 
 DATABRICKS_ISSUER = (
-    settings.databricks_workspace_url
+    f"{settings.databricks_workspace_url}"
     "/oidc"
 )
 

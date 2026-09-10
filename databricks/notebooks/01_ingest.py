@@ -28,12 +28,19 @@
 
 # COMMAND ----------
 
+# MAGIC %pip uninstall -y psycopg2 psycopg2-binary
 # MAGIC %pip install \
 # MAGIC   requests \
 # MAGIC   beautifulsoup4 \
 # MAGIC   lxml \
-# MAGIC   psycopg[binary] \
 # MAGIC   python-dateutil
+
+# COMMAND ----------
+
+# Databricks bundles a compatible psycopg2; never pip-install psycopg or
+# psycopg2 here (their bundled libpq aborts this kernel). Restart Python
+# so pip-installed deps load against a clean runtime.
+dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -296,8 +303,9 @@ article_urls = article_urls[
 # COMMAND ----------
 
 import os
-from urllib.parse import quote_plus
-import psycopg
+from urllib.parse import quote_plus, urlparse
+
+import psycopg2
 
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -321,14 +329,26 @@ if not DATABASE_URL:
     )
 
 
+def get_conn():
+
+    parsed = urlparse(DATABASE_URL)
+
+    return psycopg2.connect(
+        host=parsed.hostname,
+        port=parsed.port or 5432,
+        dbname=parsed.path.lstrip("/"),
+        user=parsed.username,
+        password=parsed.password,
+        sslmode="require",
+    )
+
+
 def get_existing_urls(urls):
 
     if not urls:
         return set()
 
-    with psycopg.connect(
-        DATABASE_URL
-    ) as conn:
+    with get_conn() as conn:
 
         with conn.cursor() as cur:
 
@@ -716,9 +736,7 @@ if parsed_articles:
 
 # COMMAND ----------
 
-with psycopg.connect(
-    DATABASE_URL
-) as conn:
+with get_conn() as conn:
 
     with conn.cursor() as cur:
 

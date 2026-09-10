@@ -10,9 +10,16 @@
 
 # COMMAND ----------
 
+# MAGIC %pip uninstall -y psycopg2 psycopg2-binary
 # MAGIC %pip install \
-# MAGIC   psycopg[binary] \
 # MAGIC   requests
+
+# COMMAND ----------
+
+# Databricks bundles a compatible psycopg2; never pip-install psycopg or
+# psycopg2 here (their bundled libpq aborts this kernel). Restart Python
+# so pip-installed deps load against a clean runtime.
+dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -43,9 +50,9 @@ embedding_model = dbutils.widgets.get(
 import json
 import os
 import time
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
-import psycopg
+import psycopg2
 
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -68,6 +75,32 @@ if not DATABASE_URL:
         "or the meczyki/lakebase_database_url secret."
     )
 
+
+def get_conn():
+
+    parsed = urlparse(DATABASE_URL)
+
+    return psycopg2.connect(
+        host=parsed.hostname,
+        port=parsed.port or 5432,
+        dbname=parsed.path.lstrip("/"),
+        user=parsed.username,
+        password=parsed.password,
+        sslmode="require",
+    )
+
+
+def pg_vector(values):
+
+    return (
+        "["
+        + ",".join(
+            repr(float(v))
+            for v in values
+        )
+        + "]"
+    )
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -75,9 +108,7 @@ if not DATABASE_URL:
 
 # COMMAND ----------
 
-with psycopg.connect(
-    DATABASE_URL
-) as conn:
+with get_conn() as conn:
 
     with conn.cursor() as cur:
 
@@ -154,9 +185,7 @@ def embed_text(
 processed = 0
 failed = 0
 
-with psycopg.connect(
-    DATABASE_URL
-) as conn:
+with get_conn() as conn:
 
     with conn.cursor() as cur:
 
@@ -189,7 +218,7 @@ with psycopg.connect(
                     """
                     UPDATE source_articles
                     SET
-                        embedding = %s,
+                        embedding = %s::vector,
                         embedding_model = %s,
                         embedding_content_hash = %s,
                         embedding_created_at = NOW(),
@@ -197,7 +226,7 @@ with psycopg.connect(
                     WHERE id = %s
                     """,
                     (
-                        vector,
+                        pg_vector(vector),
                         embedding_model,
                         content_hash,
                         article_id,

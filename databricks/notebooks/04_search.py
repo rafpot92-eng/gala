@@ -14,7 +14,14 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install psycopg[binary]
+# MAGIC %pip uninstall -y psycopg2 psycopg2-binary
+
+# COMMAND ----------
+
+# Databricks bundles a compatible psycopg2; never pip-install psycopg or
+# psycopg2 here (their bundled libpq aborts this kernel). Restart Python
+# so pip-installed deps load against a clean runtime.
+dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -49,9 +56,9 @@ if not query:
 # COMMAND ----------
 
 import os
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
-import psycopg
+import psycopg2
 
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -72,6 +79,32 @@ if not DATABASE_URL:
     raise RuntimeError(
         "No DB connection. Set DATABASE_URL, PGHOST/PGUSER/PGDATABASE, "
         "or the meczyki/lakebase_database_url secret."
+    )
+
+
+def get_conn():
+
+    parsed = urlparse(DATABASE_URL)
+
+    return psycopg2.connect(
+        host=parsed.hostname,
+        port=parsed.port or 5432,
+        dbname=parsed.path.lstrip("/"),
+        user=parsed.username,
+        password=parsed.password,
+        sslmode="require",
+    )
+
+
+def pg_vector(values):
+
+    return (
+        "["
+        + ",".join(
+            repr(float(v))
+            for v in values
+        )
+        + "]"
     )
 
 # COMMAND ----------
@@ -107,9 +140,7 @@ query_vector = embed_query(
 
 # COMMAND ----------
 
-with psycopg.connect(
-    DATABASE_URL
-) as conn:
+with get_conn() as conn:
 
     with conn.cursor() as cur:
 
@@ -131,8 +162,8 @@ with psycopg.connect(
             LIMIT %s
             """,
             (
-                query_vector,
-                query_vector,
+                pg_vector(query_vector),
+                pg_vector(query_vector),
                 limit,
             ),
         )

@@ -23,7 +23,7 @@ Frontend lint: `cd frontend && npm run lint`
 
 - `backend/` — FastAPI app (psycopg3, pydantic-settings, authlib, PyJWT) — deps in root `pyproject.toml`, managed with `uv`
 - `frontend/` — Next.js 15 / React 19 / TypeScript app
-- `databricks/` — notebooks (01_ingest, 02_embed, 03_editorial_agent, 04_search) + job YAMLs + `src/` business logic
+- `databricks/` — notebooks (01_ingest, 02_embed, 03_editorial_agent, 04_search) + job YAMLs + `src/` business logic + ops scripts (`setup_secrets.py`)
 - `database/` — SQL schema, indexes, seed data (run in order: 001 → 002 → 003)
 - `config/` — environment YAML files (development.yml, staging.yml, production.yml)
 - `scripts/` — shell scripts wrapping common tasks

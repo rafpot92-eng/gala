@@ -12,7 +12,7 @@
 
 # MAGIC %pip uninstall -y psycopg2 psycopg2-binary
 # MAGIC %pip install \
-# MAGIC   requests
+# MAGIC   sentence-transformers
 
 # COMMAND ----------
 
@@ -31,7 +31,7 @@ dbutils.widgets.text(
 
 dbutils.widgets.text(
     "embedding_model",
-    "databricks-gte-large-en",
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
     "Embedding model",
 )
 
@@ -140,40 +140,28 @@ print(
 # MAGIC %md
 # MAGIC ## Embedding function
 # MAGIC
-# MAGIC Keep provider-specific implementation here only temporarily.
-# MAGIC In the final project this should import:
-# MAGIC
-# MAGIC     from editorial.embeddings import embed_text
-# MAGIC
-# MAGIC so the notebook does not know which model/provider is used.
+# MAGIC Runs locally on the cluster with `sentence-transformers`
+# MAGIC (multilingual model — articles are Polish). Model is chosen
+# MAGIC via the `embedding_model` widget.
 
 # COMMAND ----------
 
+from sentence_transformers import SentenceTransformer
+
+
+EMBEDDER = SentenceTransformer(
+    embedding_model
+)
+
+
 def embed_text(
     text: str,
-    model: str,
 ):
 
-    """
-    Replace this implementation with the project's
-    Databricks Model Serving / embedding implementation.
-
-    The function must return:
-
-        list[float]
-    """
-
-    # Example contract only.
-    #
-    # Do not fake vectors in production.
-    #
-    # The actual implementation should call the
-    # configured Databricks embedding endpoint/model.
-
-    raise NotImplementedError(
-        "Configure the production embedding provider "
-        "in databricks/src/editorial/embeddings.py"
-    )
+    return [
+        float(v)
+        for v in EMBEDDER.encode(text)
+    ]
 
 # COMMAND ----------
 
@@ -204,8 +192,7 @@ with get_conn() as conn:
             try:
 
                 vector = embed_text(
-                    text,
-                    embedding_model,
+                    text
                 )
 
                 if not vector:

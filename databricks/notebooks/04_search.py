@@ -15,6 +15,8 @@
 # COMMAND ----------
 
 # MAGIC %pip uninstall -y psycopg2 psycopg2-binary
+# MAGIC %pip install \
+# MAGIC   sentence-transformers
 
 # COMMAND ----------
 
@@ -114,19 +116,34 @@ def pg_vector(values):
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## Query embedding
+# MAGIC
+# MAGIC Same `sentence-transformers` model as `02_embed.py` — they must
+# MAGIC match for vector similarity to work.
+
+# COMMAND ----------
+
+from sentence_transformers import SentenceTransformer
+
+
+EMBEDDING_MODEL_NAME = (
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+)
+
+QUERY_EMBEDDER = SentenceTransformer(
+    EMBEDDING_MODEL_NAME
+)
+
+
 def embed_query(
     text: str,
 ) -> list[float]:
 
-    """
-    Must use exactly the same embedding model
-    as 02_embed.py.
-    """
-
-    raise NotImplementedError(
-        "Configure query embedding provider "
-        "in editorial/embeddings.py"
-    )
+    return [
+        float(v)
+        for v in QUERY_EMBEDDER.encode(text)
+    ]
 
 
 query_vector = embed_query(

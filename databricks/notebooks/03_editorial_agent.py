@@ -29,7 +29,7 @@
 
 # MAGIC %pip uninstall -y psycopg2 psycopg2-binary
 # MAGIC %pip install \
-# MAGIC   openai
+# MAGIC   sentence-transformers
 
 # COMMAND ----------
 
@@ -64,6 +64,12 @@ dbutils.widgets.text(
     "Number of source articles",
 )
 
+dbutils.widgets.text(
+    "generation_model",
+    "databricks-meta-llama-3-3-70b-instruct",
+    "Generation model",
+)
+
 topic = dbutils.widgets.get(
     "topic"
 ).strip()
@@ -83,6 +89,10 @@ source_limit = int(
         "source_limit"
     )
 )
+
+generation_model = dbutils.widgets.get(
+    "generation_model"
+).strip()
 
 if not topic:
     raise ValueError(
@@ -157,19 +167,96 @@ def pg_vector(values):
 
 # COMMAND ----------
 
+import os
+
+import requests
+
+
+def _workspace_url():
+
+    url = os.environ.get(
+        "DATABRICKS_HOST"
+    ) or os.environ.get(
+        "DATABRICKS_WORKSPACE_URL"
+    )
+
+    if url:
+
+        return url
+
+    if "dbutils" in globals():
+
+        ctx = (
+            dbutils.notebook
+            .entry_point
+            .getDbutils()
+            .notebook()
+            .getContext()
+        )
+
+        host = ctx.workspaceUrl().get()
+
+        if host:
+
+            return f"https://{host}"
+
+    return (
+        "https://"
+        + spark.conf.get(
+            "spark.databricks.workspaceUrl"
+        )
+    )
+
+
+def _embedding_token():
+
+    if "dbutils" in globals():
+
+        return (
+            dbutils.notebook
+            .entry_point
+            .getDbutils()
+            .notebook()
+            .getContext()
+            .apiToken()
+            .get()
+        )
+
+    return os.environ.get(
+        "DATABRICKS_TOKEN"
+    )
+
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Query embedding
+# MAGIC
+# MAGIC Same `sentence-transformers` model as `02_embed.py` — they must
+# MAGIC match for vector similarity to work.
+
+# COMMAND ----------
+
+from sentence_transformers import SentenceTransformer
+
+
+EMBEDDING_MODEL_NAME = (
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+)
+
+QUERY_EMBEDDER = SentenceTransformer(
+    EMBEDDING_MODEL_NAME
+)
+
+
 def embed_query(
     text: str,
 ) -> list[float]:
 
-    """
-    Use the same embedding model/version used
-    by 02_embed.py.
-    """
-
-    raise NotImplementedError(
-        "Configure query embedding provider "
-        "in editorial/embeddings.py"
-    )
+    return [
+        float(v)
+        for v in QUERY_EMBEDDER.encode(text)
+    ]
 
 # COMMAND ----------
 
@@ -336,10 +423,8 @@ Write the article now.
 # MAGIC %md
 # MAGIC ## LLM generation
 # MAGIC
-# MAGIC The implementation below deliberately uses an abstraction.
-# MAGIC Configure the actual Databricks model-serving endpoint in:
-# MAGIC
-# MAGIC     databricks/src/editorial/llm.py
+# MAGIC Uses Databricks Foundation Models Serving, model from the
+# MAGIC `generation_model` widget (OpenAI-compatible chat API).
 
 # COMMAND ----------
 
@@ -348,25 +433,54 @@ def generate_article(
     user_prompt: str,
 ):
 
-    """
-    Production implementation should call the configured
-    Databricks model serving endpoint.
-
-    Return:
-
-    {
-        "title": str,
-        "subtitle": str,
-        "content": str,
-        "category": str,
-        "editorial_notes": str
-    }
-    """
-
-    raise NotImplementedError(
-        "Configure the LLM provider in "
-        "editorial/llm.py"
+    response = requests.post(
+        (
+            f"{_workspace_url().rstrip('/')}"
+            f"/serving-endpoints/{generation_model}/invocations"
+        ),
+        headers={
+            "Authorization": (
+                f"Bearer {_embedding_token()}"
+            ),
+            "Databricks-Context": "cache-control",
+        },
+        json={
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt,
+                },
+            ],
+            "temperature": 0.7,
+            "max_tokens": 2000,
+        },
+        timeout=600,
     )
+
+    response.raise_for_status()
+
+    content = (
+        response.json()["choices"][0]
+        ["message"]["content"]
+    )
+
+    content = content.strip()
+
+    if content.startswith("```"):
+
+        content = content.split(
+            "\n",
+            1,
+        )[-1].rsplit(
+            "```",
+            1,
+        )[0].strip()
+
+    return json.loads(content)
 
 # COMMAND ----------
 

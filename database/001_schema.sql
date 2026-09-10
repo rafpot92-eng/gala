@@ -59,8 +59,8 @@ CREATE TABLE IF NOT EXISTS source_articles (
 
     content_hash TEXT NOT NULL,
 
-    -- databricks-gte-large-en = 1024 dimensions
-    embedding VECTOR(1024),
+    -- sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 = 384
+    embedding VECTOR(384),
 
     embedding_model TEXT,
 

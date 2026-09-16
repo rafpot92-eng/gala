@@ -29,20 +29,10 @@ dbutils.widgets.text(
     "Batch size",
 )
 
-dbutils.widgets.text(
-    "embedding_model",
-    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-    "Embedding model",
-)
-
 batch_size = int(
     dbutils.widgets.get(
         "batch_size"
     )
-)
-
-embedding_model = dbutils.widgets.get(
-    "embedding_model"
 )
 
 # COMMAND ----------
@@ -141,16 +131,47 @@ print(
 # MAGIC ## Embedding function
 # MAGIC
 # MAGIC Runs locally on the cluster with `sentence-transformers`
-# MAGIC (multilingual model — articles are Polish). Model is chosen
-# MAGIC via the `embedding_model` widget.
+# MAGIC (multilingual model — articles are Polish). Keep this model in
+# MAGIC sync with `EMBEDDING_MODEL_NAME` in 03/04 — they must match.
 
 # COMMAND ----------
+
+import os
+
+
+HF_CACHE_VOLUME = os.environ.get(
+    "HF_CACHE_VOLUME",
+    "/Volumes/meczyki/models/ml-cache",
+)
+
+try:
+
+    os.makedirs(HF_CACHE_VOLUME, exist_ok=True)
+
+    os.environ["HF_HOME"] = (
+        f"{HF_CACHE_VOLUME}/hf"
+    )
+
+    os.environ["SENTENCE_TRANSFORMERS_HOME"] = (
+        f"{HF_CACHE_VOLUME}/st"
+    )
+
+except OSError:
+
+    print(
+        "Cache volume not writable; "
+        "using ephemeral cluster cache."
+    )
 
 from sentence_transformers import SentenceTransformer
 
 
+EMBEDDING_MODEL_NAME = (
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+)
+
 EMBEDDER = SentenceTransformer(
-    embedding_model
+    EMBEDDING_MODEL_NAME
 )
 
 
@@ -214,7 +235,7 @@ with get_conn() as conn:
                     """,
                     (
                         pg_vector(vector),
-                        embedding_model,
+                        EMBEDDING_MODEL_NAME,
                         content_hash,
                         article_id,
                     ),

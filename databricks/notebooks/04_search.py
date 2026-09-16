@@ -124,6 +124,33 @@ def pg_vector(values):
 
 # COMMAND ----------
 
+import os
+
+
+HF_CACHE_VOLUME = os.environ.get(
+    "HF_CACHE_VOLUME",
+    "/Volumes/meczyki/models/ml-cache",
+)
+
+try:
+
+    os.makedirs(HF_CACHE_VOLUME, exist_ok=True)
+
+    os.environ["HF_HOME"] = (
+        f"{HF_CACHE_VOLUME}/hf"
+    )
+
+    os.environ["SENTENCE_TRANSFORMERS_HOME"] = (
+        f"{HF_CACHE_VOLUME}/st"
+    )
+
+except OSError:
+
+    print(
+        "Cache volume not writable; "
+        "using ephemeral cluster cache."
+    )
+
 from sentence_transformers import SentenceTransformer
 
 

@@ -1,0 +1,23 @@
+resources:
+
+  catalogs:
+
+    meczyki:
+      name: meczyki
+      comment: Meczyki editorial platform
+
+  schemas:
+
+    meczyki_models:
+      catalog_name: meczyki
+      name: models
+      comment: Store for shared ML artifacts
+
+  volumes:
+
+    ml_cache:
+      catalog_name: meczyki
+      schema_name: models
+      name: ml-cache
+      comment: Persistent cache for sentence-transformers models
+      volume_type: MANAGED

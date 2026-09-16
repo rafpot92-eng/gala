@@ -593,7 +593,7 @@ def retrieve_chunks(
         for row in candidates
     ]
 
-    scores = RERANKER.score(pairs)
+    scores = RERANKER.predict(pairs)
 
     ranked = sorted(
         zip(candidates, scores),

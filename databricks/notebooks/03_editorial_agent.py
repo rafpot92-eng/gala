@@ -765,13 +765,21 @@ def generate(
 
         content = content.strip()
 
-        if content.startswith("```"):
+        if "```" in content:
 
-            content = (
-                content.split("\n", 1)[-1]
-                .rsplit("```", 1)[0]
-                .strip()
-            )
+            parts = content.split("```")
+
+            if len(parts) >= 3:
+
+                content = parts[1].strip()
+
+                if content.startswith(
+                    ("json", "JSON")
+                ):
+
+                    content = content.split(
+                        "\n", 1
+                    )[-1].strip()
 
         if not content:
 

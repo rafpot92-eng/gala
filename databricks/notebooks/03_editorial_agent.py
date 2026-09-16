@@ -679,6 +679,27 @@ def build_packet(
 import requests
 
 
+def _extract_content(response_json):
+    try:
+
+        return (
+            response_json["choices"][0]
+            ["message"]["content"]
+        )
+
+    except (KeyError, IndexError, TypeError):
+
+        try:
+
+            return response_json[
+                "predictions"
+            ][0]
+
+        except (KeyError, IndexError, TypeError):
+
+            return str(response_json)
+
+
 def generate(
     system_prompt: str,
     user_prompt: str,
@@ -688,7 +709,7 @@ def generate(
 
     last_error = None
 
-    for _ in range(2):
+    for attempt in range(2):
 
         response = requests.post(
             (
@@ -720,10 +741,27 @@ def generate(
 
         response.raise_for_status()
 
-        content = (
-            response.json()["choices"][0]
-            ["message"]["content"]
-        )
+        payload = response.json()
+
+        content = _extract_content(payload)
+
+        if content is None:
+
+            last_error = ValueError(
+                "Model returned null content"
+            )
+
+            print(
+                f"ATTEMPT {attempt + 1}: model "
+                "returned null content.\n"
+                f"Full response headers: "
+                f"{response.headers}\n"
+                f"Full response body: "
+                f"{json.dumps(payload)[:2000]}\n"
+                "Retrying once."
+            )
+
+            continue
 
         content = content.strip()
 
@@ -734,6 +772,22 @@ def generate(
                 .rsplit("```", 1)[0]
                 .strip()
             )
+
+        if not content:
+
+            last_error = ValueError(
+                "Empty response from model"
+            )
+
+            print(
+                f"ATTEMPT {attempt + 1}: model "
+                "returned empty response.\n"
+                f"Full response body: "
+                f"{json.dumps(payload)[:2000]}\n"
+                "Retrying once."
+            )
+
+            continue
 
         try:
 
@@ -747,8 +801,11 @@ def generate(
             last_error = exc
 
             print(
-                "Model returned invalid JSON; "
-                "retrying once."
+                f"ATTEMPT {attempt + 1}: model "
+                "returned invalid JSON; "
+                "retrying once.\n"
+                f"Raw response (first 500 chars): "
+                f"{content[:500]}"
             )
 
     raise RuntimeError(

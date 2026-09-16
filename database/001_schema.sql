@@ -74,6 +74,38 @@ CREATE TABLE IF NOT EXISTS source_articles (
 
 
 -- ============================================================
+-- SOURCE ARTICLE CHUNKS
+--
+-- Chunks are the actual retrieval unit. Each article is
+-- split into ~1,000-char paragraph-aware pieces and
+-- embedded with intfloat/multilingual-e5-large (1024 dim).
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS source_article_chunks (
+    id BIGSERIAL PRIMARY KEY,
+
+    source_article_id BIGINT NOT NULL
+        REFERENCES source_articles(id)
+        ON DELETE CASCADE,
+
+    chunk_index INTEGER NOT NULL,
+
+    content TEXT NOT NULL,
+
+    content_hash TEXT NOT NULL,
+
+    -- intfloat/multilingual-e5-large = 1024
+    embedding VECTOR(1024),
+
+    embedding_model TEXT,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    UNIQUE (source_article_id, chunk_index)
+);
+
+
+-- ============================================================
 -- GENERATED ARTICLES
 -- ============================================================
 

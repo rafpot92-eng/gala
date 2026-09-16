@@ -3,27 +3,23 @@
 # MAGIC %md
 # MAGIC # 03 — Editorial Agent
 # MAGIC
-# MAGIC Generates an original sports article from source material.
+# MAGIC Generates editorial draft articles from Meczyki source material.
 # MAGIC
-# MAGIC Parameters:
+# MAGIC Flow:
 # MAGIC
-# MAGIC     topic
-# MAGIC     category
-# MAGIC     desired_length
+# MAGIC     topic selection (widget or cluster-derived)
+# MAGIC         ↓
+# MAGIC     chunk retrieval → cross-encoder rerank → dedupe
+# MAGIC         ↓
+# MAGIC     extract facts from labeled chunks
+# MAGIC         ↓
+# MAGIC     write article from fact sheet
+# MAGIC         ↓
+# MAGIC     critique: check grounding vs facts, revise if critical
+# MAGIC         ↓
+# MAGIC     persist as draft
 # MAGIC
-# MAGIC IMPORTANT:
-# MAGIC
-# MAGIC The AI agent can only create:
-# MAGIC
-# MAGIC     draft
-# MAGIC
-# MAGIC It can never create:
-# MAGIC
-# MAGIC     ready_for_review
-# MAGIC     approved
-# MAGIC     published
-# MAGIC
-# MAGIC Human editorial workflow is handled by FastAPI.
+# MAGIC The status is hard-coded to `draft`. Humans approve/publish.
 
 # COMMAND ----------
 
@@ -33,9 +29,6 @@
 
 # COMMAND ----------
 
-# Databricks bundles a compatible psycopg2; never pip-install psycopg or
-# psycopg2 here (their bundled libpq aborts this kernel). Restart Python
-# so pip-installed deps load against a clean runtime.
 dbutils.library.restartPython()
 
 # COMMAND ----------
@@ -55,13 +48,13 @@ dbutils.widgets.text(
 dbutils.widgets.text(
     "desired_length",
     "700",
-    "Desired article length",
+    "Desired article length (words)",
 )
 
 dbutils.widgets.text(
     "source_limit",
     "8",
-    "Number of source articles",
+    "Chunks to send to the writer",
 )
 
 dbutils.widgets.text(
@@ -188,19 +181,15 @@ def pg_vector(values):
         + "]"
     )
 
-# COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## Retrieval
-# MAGIC
-# MAGIC We use vector similarity to find relevant source articles.
-# MAGIC
-# MAGIC The actual embedding implementation should be shared with
-# MAGIC `02_embed.py`.
+def parse_vector(value):
+
+    return np.array(
+        value.strip("[]").split(","),
+        dtype=np.float64,
+    )
 
 # COMMAND ----------
-
-import os
 
 import requests
 
@@ -219,8 +208,6 @@ def _workspace_url():
 
     if "dbutils" in globals():
 
-        # ponytail: workspaceUrl() was removed from the runtime
-        # context API; browserHostName tag is the fallback.
         try:
 
             host = (
@@ -267,14 +254,13 @@ def _embedding_token():
         "DATABRICKS_TOKEN"
     )
 
-
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Query embedding
+# MAGIC ## Embedding + reranking
 # MAGIC
-# MAGIC Same `sentence-transformers` model as `02_embed.py` — they must
-# MAGIC match for vector similarity to work.
+# MAGIC E5-large for retrieval embeddings (1024 dims, multilingual).
+# MAGIC Cross-encoder `bge-reranker-v2-m3` for reranking top candidates.
 
 # COMMAND ----------
 
@@ -305,15 +291,22 @@ except OSError:
         "using ephemeral cluster cache."
     )
 
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import (
+    CrossEncoder,
+    SentenceTransformer,
+)
 
 
 EMBEDDING_MODEL_NAME = (
-    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    "intfloat/multilingual-e5-large"
 )
 
 QUERY_EMBEDDER = SentenceTransformer(
     EMBEDDING_MODEL_NAME
+)
+
+RERANKER = CrossEncoder(
+    "BAAI/bge-reranker-v2-m3"
 )
 
 
@@ -323,19 +316,21 @@ def embed_query(
 
     return [
         float(v)
-        for v in QUERY_EMBEDDER.encode(text)
+        for v in QUERY_EMBEDDER.encode(
+            f"query: {text}"
+        )
     ]
 
 # COMMAND ----------
 
-def parse_vector(
-    value: str,
-) -> np.ndarray:
+# MAGIC %md
+# MAGIC ## Topic selection
+# MAGIC
+# MAGIC If the `topic` widget is blank, cluster articles from the last
+# MAGIC batch by their mean chunk embeddings and derive topics + a
+# MAGIC temperature-weighted article count per topic.
 
-    return np.array(
-        value.strip("[]").split(","),
-        dtype=np.float64,
-    )
+# COMMAND ----------
 
 
 def kmeans(
@@ -373,11 +368,6 @@ def kmeans(
             )
         ]
 
-    labels = np.zeros(
-        X.shape[0],
-        dtype=int,
-    )
-
     for _ in range(iters):
 
         labels = (
@@ -407,20 +397,6 @@ def kmeans(
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## Topic selection
-# MAGIC
-# MAGIC If the `topic` widget is blank, derive topics from the last
-# MAGIC batch of ingested articles with k-means on their embeddings.
-# MAGIC Each cluster becomes one topic, seeded by the title of the
-# MAGIC article nearest its centroid.
-# MAGIC
-# MAGIC Temperature of a topic = 0.5 * (cluster share of the batch)
-# MAGIC + 0.5 * (mean recency of the cluster's articles). Hotter
-# MAGIC topics get a larger share of the run's article budget.
-
-# COMMAND ----------
-
 topics = []
 
 if topic:
@@ -438,15 +414,19 @@ else:
             cur.execute(
                 """
                 SELECT
-                    id,
-                    title,
-                    published_at,
-                    embedding
-                FROM source_articles
-                WHERE embedding IS NOT NULL
-                  AND ingested_at >= (
+                    a.id,
+                    a.title,
+                    a.published_at,
+                    AVG(c.embedding) AS mean_emb
+                FROM source_articles a
+                JOIN source_article_chunks c
+                    ON c.source_article_id = a.id
+                WHERE c.embedding IS NOT NULL
+                  AND a.ingested_at >= (
                       NOW() - (%s || ' hours')::interval
                   )
+                GROUP BY
+                    a.id, a.title, a.published_at
                 """,
                 (batch_lookback_hours,),
             )
@@ -470,10 +450,7 @@ else:
         len(batch_rows),
     )
 
-    labels, _ = kmeans(
-        matrix,
-        k,
-    )
+    labels, _ = kmeans(matrix, k)
 
     now = datetime.now(
         timezone.utc
@@ -496,31 +473,28 @@ else:
         )
 
         distances = (
-            (cluster_matrix - centroid)
-            ** 2
+            (cluster_matrix - centroid) ** 2
         ).sum(axis=1)
 
-        representative = batch_rows[
+        rep = batch_rows[
             int(indexes[distances.argmin()])
         ]
 
-        topic_label = representative[1]
+        topic_label = rep[1]
 
         share = (
             len(indexes) / len(batch_rows)
         )
 
-        hours_since_published = []
+        hours_since = []
 
-        for row_index in indexes:
+        for ri in indexes:
 
-            published = batch_rows[
-                int(row_index)
-            ][2]
+            published = batch_rows[int(ri)][2]
 
             if published:
 
-                hours_since_published.append(
+                hours_since.append(
                     max(
                         0.0,
                         (
@@ -529,33 +503,25 @@ else:
                     )
                 )
 
-        if hours_since_published:
-
-            average_hours = (
-                sum(hours_since_published)
-                / len(hours_since_published)
-            )
-
-            recency = 1.0 / (
-                1.0 + average_hours
-            )
-
-        else:
-
-            recency = 0.0
-
-        temperature = (
-            0.5 * share
-            + 0.5 * recency
+        avg_hours = (
+            sum(hours_since) / len(hours_since)
+            if hours_since
+            else 0.0
         )
 
-        article_count = max(
+        recency = 1.0 / (1.0 + avg_hours)
+
+        temperature = (
+            0.5 * share + 0.5 * recency
+        )
+
+        count = max(
             1,
             round(max_articles * temperature),
         )
 
         topics.append(
-            (topic_label, article_count)
+            (topic_label, count)
         )
 
     print(
@@ -563,84 +529,161 @@ else:
         f"from the last batch:"
     )
 
-    for topic_label, article_count in topics:
+    for tl, cnt in topics:
 
-        print(
-            f"- {article_count}x "
-            f"{topic_label!r}"
-        )
+        print(f"- {cnt}x {tl!r}")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Editorial prompt
-# MAGIC
-# MAGIC The prompt explicitly prevents invented facts and treats sources
-# MAGIC as evidence rather than text to copy.
+# MAGIC ## Retrieval
 
 # COMMAND ----------
 
-SYSTEM_PROMPT = """
-You are an experienced Polish sports journalist.
+RERANK_CANDIDATES = 50
 
-Your job is to create an original sports article
-using the supplied source material.
 
-Rules:
+def retrieve_chunks(
+    query_text,
+    query_vector,
+    limit=source_limit,
+):
 
-1. Write in Polish.
-2. Do not copy source articles verbatim.
-3. Do not invent facts.
-4. Do not invent quotations.
-5. Do not present rumors as confirmed facts.
-6. Clearly attribute uncertain information.
-7. Pay attention to publication dates.
-8. If sources conflict, acknowledge the uncertainty.
-9. Do not fabricate statistics, transfers, injuries,
-   lineups, dates or statements.
-10. The article must be independently written.
-11. Do not mention that you are an AI.
-12. Do not claim that a source confirms something
-    unless the source actually supports it.
+    with get_conn() as conn:
 
-Return JSON with:
+        with conn.cursor() as cur:
 
-{
-  "title": "...",
-  "subtitle": "...",
-  "content": "...",
-  "category": "...",
-  "editorial_notes": "..."
-}
+            cur.execute(
+                """
+                SELECT
+                    c.id,
+                    c.source_article_id,
+                    c.chunk_index,
+                    c.content,
+                    c.embedding,
+                    s.title,
+                    s.canonical_url,
+                    s.published_at,
+                    1 - (
+                        c.embedding <=> %s::vector
+                    ) AS similarity
+                FROM source_article_chunks c
+                JOIN source_articles s
+                    ON s.id = c.source_article_id
+                WHERE c.embedding IS NOT NULL
+                ORDER BY
+                    c.embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (
+                    pg_vector(query_vector),
+                    pg_vector(query_vector),
+                    RERANK_CANDIDATES,
+                ),
+            )
 
-The editorial_notes field is internal metadata for
-the human editor and must mention important uncertainty,
-rumors or conflicting source information.
-"""
+            candidates = cur.fetchall()
 
-TODAY = datetime.now(
-    timezone.utc
-).date().isoformat()
+    if not candidates:
 
-SYSTEM_PROMPT += (
-    f"\nToday's date is {TODAY}. "
-    "Use it to judge how current the "
-    "publication dates of the sources are.\n"
-)
+        return []
+
+    pairs = [
+        (query_text, row[3])
+        for row in candidates
+    ]
+
+    scores = RERANKER.score(pairs)
+
+    ranked = sorted(
+        zip(candidates, scores),
+        key=lambda x: x[1],
+        reverse=True,
+    )
+
+    selected = []
+    seen = []
+
+    for row, score in ranked:
+
+        is_dup = False
+
+        for prev in seen:
+
+            vec_a = parse_vector(row[4])
+            vec_b = parse_vector(prev)
+
+            cos = (
+                float(np.dot(vec_a, vec_b))
+                / (
+                    float(np.linalg.norm(vec_a))
+                    * float(np.linalg.norm(vec_b))
+                    + 1e-10
+                )
+            )
+
+            if cos > 0.95:
+
+                is_dup = True
+                break
+
+        if is_dup:
+
+            continue
+
+        selected.append(
+            (row, float(score))
+        )
+
+        seen.append(row[4])
+
+        if len(selected) >= limit:
+
+            break
+
+    return selected
+
+
+def build_packet(
+    reranked_chunks,
+) -> str:
+
+    parts = []
+
+    for i, (row, score) in enumerate(
+        reranked_chunks, start=1
+    ):
+
+        parts.append(
+            f"SOURCE S{i}\n"
+            f"ARTICLE: {row[5]}\n"
+            f"URL: {row[6]}\n"
+            f"PUBLISHED: {row[7]}\n"
+            f"RELEVANCE: {float(row[8]):.4f}\n\n"
+            f"{row[3]}"
+        )
+
+    return "\n\n".join(parts)
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## LLM generation
 # MAGIC
-# MAGIC Uses Databricks Foundation Models Serving, model from the
-# MAGIC `generation_model` widget (OpenAI-compatible chat API).
+# MAGIC Single `generate()` function used for extract / write / critique.
+# MAGIC Retries once on JSON parse failure, returning a clear error on
+# MAGIC second failure.
 
 # COMMAND ----------
 
-def generate_article(
+import requests
+
+
+def generate(
     system_prompt: str,
     user_prompt: str,
+    temperature: float = 0.2,
+    max_tokens: int = 4000,
 ):
 
     last_error = None
@@ -669,8 +712,8 @@ def generate_article(
                         "content": user_prompt,
                     },
                 ],
-                "temperature": 0.2,
-                "max_tokens": 4000,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
             },
             timeout=600,
         )
@@ -686,13 +729,11 @@ def generate_article(
 
         if content.startswith("```"):
 
-            content = content.split(
-                "\n",
-                1,
-            )[-1].rsplit(
-                "```",
-                1,
-            )[0].strip()
+            content = (
+                content.split("\n", 1)[-1]
+                .rsplit("```", 1)[0]
+                .strip()
+            )
 
         try:
 
@@ -717,13 +758,161 @@ def generate_article(
 
 # COMMAND ----------
 
+TODAY = datetime.now(
+    timezone.utc
+).date().isoformat()
+
+# COMMAND ----------
+
+EXTRACT_SYSTEM = (
+    "You are a factual extraction assistant.\n"
+    "\n"
+    "Given labeled source chunks, extract the key\n"
+    "facts relevant to the topic. Each fact must\n"
+    "reference its source label (S1, S2, ...).\n"
+    "\n"
+    "Output JSON:\n"
+    '{"facts": [{"fact": "...", "source": "S1"}]}\n'
+    "\n"
+    "Rules:\n"
+    "- Extract only facts, not opinions.\n"
+    "- Use the exact source label.\n"
+    "- Include dates, names, scores, and specific\n"
+    "  details when present.\n"
+    "- Do not add facts not in the sources.\n"
+)
+
+WRITE_SYSTEM = (
+    "You are an experienced Polish sports journalist.\n"
+    "\n"
+    "Write an original article from the supplied\n"
+    "fact sheet and topic.\n"
+    "\n"
+    "Rules:\n"
+    "\n"
+    "1. Write in Polish.\n"
+    "2. Every factual claim must be in the fact sheet.\n"
+    "3. Do not invent facts, quotes, or statistics.\n"
+    "4. Do not present rumors as confirmed.\n"
+    "5. Clearly attribute uncertain information.\n"
+    "6. If facts conflict, acknowledge the uncertainty.\n"
+    "7. Structure: strong lede, 2-3 detail sections,\n"
+    "   closing. Avoid generic AI filler phrases\n"
+    '   ("W zaskakującym rozwoju sytuacji",\n'
+    '    "Warto zauważyć").\n'
+    "8. Do not mention you are an AI.\n"
+    f"9. Target length: approximately {desired_length} words.\n"
+    "\n"
+    "Return JSON:\n"
+    "{\n"
+    '  "title": "...",\n'
+    '  "subtitle": "...",\n'
+    '  "content": "...",\n'
+    '  "category": "...",\n'
+    '  "editorial_notes": "Internal notes for the human editor. Mention uncertainty, conflicting facts, and gaps in the source material."\n'
+    "}\n"
+    "\n"
+    f"Today's date is {TODAY}. Use it to judge\n"
+    "how current the publication dates of the\n"
+    "sources are.\n"
+)
+
+CRITIQUE_SYSTEM = (
+    "You are a sports journalism fact-checker.\n"
+    "\n"
+    "Review the article against the source facts.\n"
+    "For each issue, return an issue object.\n"
+    "\n"
+    "Output JSON:\n"
+    '{"issues": [{"type": "hallucination",\n'
+    '  "description": "...",\n'
+    '  "severity": "critical"}]}\n'
+    "\n"
+    "Severity: critical = must fix (hallucination,\n"
+    "contradiction), minor = polish (redundancy,\n"
+    "fluff, style).\n"
+    "\n"
+    "Rules:\n"
+    "- Check factual grounding: does every claim\n"
+    "  trace to at least one source fact?\n"
+    "- Check for invented details.\n"
+    "- Check for redundancy and fluff.\n"
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Validation
+
+# COMMAND ----------
+
+REQUIRED_FIELDS = [
+    "title",
+    "subtitle",
+    "content",
+    "category",
+    "editorial_notes",
+]
+
+
+def validate_article(article):
+
+    errors = []
+
+    for field in REQUIRED_FIELDS:
+
+        if not article.get(field):
+
+            errors.append({
+                "type": "missing_field",
+                "description": (
+                    f"Missing field: {field}"
+                ),
+                "severity": "critical",
+            })
+
+    content = article.get("content", "")
+
+    if content and len(content.split()) < 150:
+
+        errors.append({
+            "type": "short_content",
+            "description": (
+                "Article under 150 words"
+            ),
+            "severity": "critical",
+        })
+
+    title = article.get("title", "")
+
+    if title and len(title) > 150:
+
+        errors.append({
+            "type": "long_title",
+            "description": (
+                f"Title is {len(title)} chars"
+            ),
+            "severity": "minor",
+        })
+
+    return errors
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Generation loop
+
+# COMMAND ----------
+
+CRITIQUE_MAX_ROUNDS = 2
+
 generated_article_ids = []
 
 for topic_label, article_count in topics:
 
     print(
         f"Generating {article_count} article(s) "
-        f"for topic: {topic_label!r}"
+        f"for: {topic_label!r}"
     )
 
     for _ in range(article_count):
@@ -732,125 +921,138 @@ for topic_label, article_count in topics:
             f"{topic_label}\n{category}"
         )
 
-        with get_conn() as conn:
+        query_text = (
+            f"{topic_label}\n{category}"
+        )
 
-            with conn.cursor() as cur:
+        reranked = retrieve_chunks(
+            query_text,
+            query_vector,
+            limit=source_limit,
+        )
 
-                cur.execute(
-                    """
-                    SELECT
-                        id,
-                        title,
-                        description,
-                        content,
-                        canonical_url,
-                        published_at,
-                        1 - (
-                            embedding <=> %s::vector
-                        ) AS similarity
-                    FROM source_articles
-                    WHERE embedding IS NOT NULL
-                    ORDER BY
-                        embedding <=> %s::vector
-                    LIMIT %s
-                    """,
-                    (
-                        pg_vector(query_vector),
-                        pg_vector(query_vector),
-                        source_limit,
-                    ),
-                )
-
-                sources = cur.fetchall()
-
-        if not sources:
+        if not reranked:
 
             print(
-                "No source articles found for "
-                "this topic; skipping."
+                "No chunks found; skipping."
             )
 
             continue
 
-        source_packet_parts = []
+        packet = build_packet(reranked)
 
-        for index, source in enumerate(
-            sources,
-            start=1,
-        ):
+        # ---- extract facts ----
 
-            (
-                source_id,
-                title,
-                description,
-                content,
-                canonical_url,
-                published_at,
-                similarity,
-            ) = source
+        facts = generate(
+            EXTRACT_SYSTEM,
+            f"TOPIC: {topic_label}\n"
+            f"CATEGORY: {category}\n\n"
+            f"{packet}",
+            temperature=0.1,
+        )
 
-            source_packet_parts.append(
-                f"""
-SOURCE {index}
+        facts_list = (
+            facts.get("facts", [])
+            if isinstance(facts, dict)
+            else []
+        )
 
-ID: {source_id}
-TITLE: {title}
-URL: {canonical_url}
-PUBLISHED: {published_at}
-RELEVANCE: {similarity:.4f}
+        # ---- write article ----
 
-CONTENT:
-{content}
-"""
+        article = generate(
+            WRITE_SYSTEM,
+            "FACTS:\n"
+            + json.dumps(
+                facts_list,
+                ensure_ascii=False,
+                indent=2,
+            )
+            + f"\n\nTOPIC: {topic_label}\n"
+            f"CATEGORY: {category}\n"
+            f"TARGET LENGTH: approximately "
+            f"{desired_length} words\n",
+            temperature=0.4,
+        )
+
+        # ---- critique + revise ----
+
+        for _ in range(CRITIQUE_MAX_ROUNDS):
+
+            issues = validate_article(article)
+
+            issues_resp = generate(
+                CRITIQUE_SYSTEM,
+                f"TOPIC: {topic_label}\n\n"
+                "ARTICLE:\n"
+                + json.dumps(
+                    article,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n\nFACTS:\n"
+                + json.dumps(
+                    facts_list,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
             )
 
-        source_packet = "\n\n".join(
-            source_packet_parts
-        )
+            critique_issues = (
+                issues_resp.get("issues", [])
+                if isinstance(issues_resp, dict)
+                else []
+            )
 
-        user_prompt = f"""
-TOPIC:
-{topic_label}
+            issues.extend([
+                i for i in critique_issues
+                if i.get("severity") == "critical"
+            ])
 
-CATEGORY:
-{category}
+            if not issues:
 
-TARGET LENGTH:
-approximately {desired_length} words
+                break
 
-SOURCE MATERIAL:
-{source_packet}
+            print(
+                f"  {len(issues)} issue(s) — "
+                f"revising."
+            )
 
-Write the article now.
-"""
-
-        article = generate_article(
-            SYSTEM_PROMPT,
-            user_prompt,
-        )
-
-        required_fields = [
-            "title",
-            "subtitle",
-            "content",
-            "category",
-            "editorial_notes",
-        ]
-
-        for field in required_fields:
-
-            if not article.get(field):
-
-                raise ValueError(
-                    f"Generated article missing "
-                    f"field: {field}"
+            article = generate(
+                WRITE_SYSTEM
+                + "\n\nPrevious version had "
+                "issues:\n"
+                + json.dumps(
+                    [
+                        i["description"]
+                        for i in issues
+                    ],
+                    ensure_ascii=False,
                 )
+                + "\nFix these. Do not introduce "
+                "new hallucinations.\n",
+                "FACTS:\n"
+                + json.dumps(
+                    facts_list,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + f"\n\nTOPIC: {topic_label}\n"
+                f"CATEGORY: {category}\n"
+                f"TARGET LENGTH: approximately "
+                f"{desired_length} words\n",
+                temperature=0.4,
+            )
 
-        #
-        # Persist as `draft` only. There is
-        # intentionally no parameter that can
-        # change this — humans approve/publish.
-        #
+        errors = validate_article(article)
+
+        if errors:
+
+            raise ValueError(
+                "Article failed validation "
+                f"after revision: {errors}"
+            )
+
+        # ---- persist (draft only) ----
 
         with get_conn() as conn:
 
@@ -859,30 +1061,22 @@ Write the article now.
                 cur.execute(
                     """
                     INSERT INTO generated_articles (
-                        title,
-                        subtitle,
-                        content,
-                        category,
-                        status,
+                        title, subtitle, content,
+                        category, status,
                         generated_by,
                         generation_topic,
                         desired_length,
                         editorial_notes,
-                        created_at,
-                        updated_at
+                        created_at, updated_at
                     )
                     VALUES (
-                        %s,
-                        %s,
-                        %s,
-                        %s,
-                        'draft',
+                        %s, %s, %s,
+                        %s, 'draft',
                         'editorial_agent',
                         %s,
                         %s,
                         %s,
-                        NOW(),
-                        NOW()
+                        NOW(), NOW()
                     )
                     RETURNING id
                     """,
@@ -897,16 +1091,23 @@ Write the article now.
                     ),
                 )
 
-                generated_article_id = (
-                    cur.fetchone()[0]
-                )
+                new_id = cur.fetchone()[0]
 
-                #
-                # Store exactly which source articles
-                # were used by the model.
-                #
+                source_map = {}
 
-                for source in sources:
+                for row, _ in reranked:
+
+                    sa_id = row[1]
+                    sim = float(row[8])
+
+                    source_map[sa_id] = max(
+                        source_map.get(sa_id, 0),
+                        sim,
+                    )
+
+                for sa_id, sim in (
+                    source_map.items()
+                ):
 
                     cur.execute(
                         """
@@ -915,29 +1116,18 @@ Write the article now.
                             source_article_id,
                             similarity_score
                         )
-                        VALUES (
-                            %s,
-                            %s,
-                            %s
-                        )
+                        VALUES (%s, %s, %s)
                         ON CONFLICT DO NOTHING
                         """,
-                        (
-                            generated_article_id,
-                            source[0],
-                            source[6],
-                        ),
+                        (new_id, sa_id, sim),
                     )
 
             conn.commit()
 
-        generated_article_ids.append(
-            generated_article_id
-        )
+        generated_article_ids.append(new_id)
 
         print(
-            f"Created generated article "
-            f"{generated_article_id} (draft)"
+            f"  Created {new_id} (draft)"
         )
 
 if not generated_article_ids:

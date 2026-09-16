@@ -8,7 +8,7 @@ AI-assisted sports editorial platform. Databricks ingests articles from Meczyki,
 
 ```bash
 make setup          # install backend + frontend deps
-make db-init        # run database/001_schema.sql + 002_indexes.sql (+ seed in dev)
+make db-init        # run database/001_schema.sql + 002_indexes.sql + 003_seed (+004 new-chunk migrations on live)
 make dev            # start both backend and frontend
 make backend        # backend only: uvicorn app.main:app --reload --port 8000
 make frontend       # frontend only: cd frontend && npm run dev
@@ -23,8 +23,8 @@ Frontend lint: `cd frontend && npm run lint`
 
 - `backend/` — FastAPI app (psycopg3, pydantic-settings, authlib, PyJWT) — deps in root `pyproject.toml`, managed with `uv`
 - `frontend/` — Next.js 15 / React 19 / TypeScript app
-- `databricks/` — notebooks (01_ingest, 02_embed, 03_editorial_agent, 04_search) + job YAMLs + `src/` business logic + ops scripts (`setup_secrets.py`)
-- `database/` — SQL schema, indexes, seed data (run in order: 001 → 002 → 003)
+- `databricks/` — notebooks (01_ingest, 02_embed, 03_editorial_agent, 04_search, 05_eval) + job YAMLs + `src/` business logic + ops scripts (`setup_secrets.py`)
+- `database/` — SQL schema, indexes, seed data, chunk-retrieval migration (run in order: 001 → 002 → 003 → 004)
 - `config/` — environment YAML files (development.yml, staging.yml, production.yml)
 - `scripts/` — shell scripts wrapping common tasks
 - `src/gala/` — package placeholder (not yet populated)

@@ -3,10 +3,14 @@
 # MAGIC %md
 # MAGIC # 02 — Generate Article Embeddings
 # MAGIC
-# MAGIC Finds source articles that do not have a current embedding,
-# MAGIC generates vectors, and stores them in Lakebase.
+# MAGIC Chunks each source article into ~1,000-char paragraph-aware
+# MAGIC pieces and embeds them with `intfloat/multilingual-e5-large`
+# MAGIC (1024 dims). Chunks are the actual retrieval unit used by
+# MAGIC `03_editorial_agent.py` and `04_search.py`.
 # MAGIC
-# MAGIC This notebook is incremental and safe to rerun.
+# MAGIC This notebook is incremental and safe to rerun. It picks up
+# MAGIC any article that does not yet have chunks for the current
+# MAGIC embedding model.
 
 # COMMAND ----------
 
@@ -37,9 +41,9 @@ batch_size = int(
 
 # COMMAND ----------
 
+import hashlib
 import json
 import os
-import time
 from urllib.parse import quote_plus, urlparse
 
 import psycopg2
@@ -94,9 +98,17 @@ def pg_vector(values):
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Load articles needing embeddings
+# MAGIC ## Load articles needing chunks
+# MAGIC
+# MAGIC An article is picked up if it does not yet have chunks
+# MAGIC with the current `embedding_model`.
 
 # COMMAND ----------
+
+EMBEDDING_MODEL_NAME = (
+    "intfloat/multilingual-e5-large"
+)
+
 
 with get_conn() as conn:
 
@@ -104,35 +116,112 @@ with get_conn() as conn:
 
         cur.execute(
             """
-            SELECT
-                id,
-                title,
-                content,
-                content_hash
-            FROM source_articles
-            WHERE embedding IS NULL
-            ORDER BY ingested_at
+            SELECT a.id, a.title, a.content, a.content_hash
+            FROM source_articles a
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM source_article_chunks c
+                WHERE c.source_article_id = a.id
+                  AND c.embedding_model = %s
+            )
+            ORDER BY a.ingested_at
             LIMIT %s
             """,
-            (batch_size,),
+            (
+                EMBEDDING_MODEL_NAME,
+                batch_size,
+            ),
         )
 
         articles = cur.fetchall()
 
 
 print(
-    f"Articles requiring embeddings: "
+    f"Articles requiring chunks: "
     f"{len(articles)}"
 )
 
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Chunking
+# MAGIC
+# MAGIC Paragraph-aware: split on `\n\n`, accumulate up to 1,000 chars
+# MAGIC per chunk. Any paragraph longer than 1,000 chars is hard-split
+# MAGIC with a 150-char overlap to preserve sentence boundaries.
+
+# COMMAND ----------
+
+MAX_CHARS = 1000
+HARD_SPLIT_OVERLAP = 150
+
+
+def chunk_article(
+    text: str,
+) -> list[str]:
+
+    paragraphs = [
+        p.strip()
+        for p in text.split("\n\n")
+        if p.strip()
+    ]
+
+    chunks = []
+    current = ""
+
+    for paragraph in paragraphs:
+
+        if len(paragraph) > MAX_CHARS:
+
+            if current:
+
+                chunks.append(current)
+                current = ""
+
+            for start in range(
+                0,
+                len(paragraph),
+                MAX_CHARS - HARD_SPLIT_OVERLAP,
+            ):
+
+                chunks.append(
+                    paragraph[
+                        start:
+                        start + MAX_CHARS
+                    ]
+                )
+
+        elif (
+            len(current) + len(paragraph) + 2
+            <= MAX_CHARS
+        ):
+
+            current = (
+                f"{current}\n\n{paragraph}"
+                if current
+                else paragraph
+            )
+
+        else:
+
+            chunks.append(current)
+            current = paragraph
+
+    if current:
+
+        chunks.append(current)
+
+    return chunks
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Embedding function
 # MAGIC
-# MAGIC Runs locally on the cluster with `sentence-transformers`
-# MAGIC (multilingual model — articles are Polish). Keep this model in
-# MAGIC sync with `EMBEDDING_MODEL_NAME` in 03/04 — they must match.
+# MAGIC Runs locally on the cluster with `sentence-transformers`.
+# MAGIC E5 requires a `passage:` prefix for document embeddings and
+# MAGIC a `query:` prefix for query embeddings — the query variant
+# MAGIC lives in 03/04.
 
 # COMMAND ----------
 
@@ -166,28 +255,27 @@ except OSError:
 from sentence_transformers import SentenceTransformer
 
 
-EMBEDDING_MODEL_NAME = (
-    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-)
-
 EMBEDDER = SentenceTransformer(
     EMBEDDING_MODEL_NAME
 )
 
 
-def embed_text(
-    text: str,
-):
+def embed_chunks(
+    texts: list[str],
+) -> list[list[float]]:
 
     return [
-        float(v)
-        for v in EMBEDDER.encode(text)
+        [float(v) for v in vec]
+        for vec in EMBEDDER.encode(
+            texts,
+            show_progress_bar=False,
+        )
     ]
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Generate and persist vectors
+# MAGIC ## Generate and persist chunks
 
 # COMMAND ----------
 
@@ -205,41 +293,65 @@ with get_conn() as conn:
             content_hash,
         ) in articles:
 
-            text = (
-                f"{title}\n\n"
-                f"{content}"
-            )
-
             try:
 
-                vector = embed_text(
-                    text
-                )
+                chunks = chunk_article(content)
 
-                if not vector:
+                if not chunks:
 
                     raise ValueError(
-                        "Embedding returned empty vector"
+                        "Chunking returned empty list"
                     )
+
+                prefixed = [
+                    f"passage: {c}"
+                    for c in chunks
+                ]
+
+                vectors = embed_chunks(
+                    prefixed
+                )
 
                 cur.execute(
                     """
-                    UPDATE source_articles
-                    SET
-                        embedding = %s::vector,
-                        embedding_model = %s,
-                        embedding_content_hash = %s,
-                        embedding_created_at = NOW(),
-                        updated_at = NOW()
-                    WHERE id = %s
+                    DELETE FROM source_article_chunks
+                    WHERE source_article_id = %s
                     """,
-                    (
-                        pg_vector(vector),
-                        EMBEDDING_MODEL_NAME,
-                        content_hash,
-                        article_id,
-                    ),
+                    (article_id,),
                 )
+
+                for idx, (
+                    vector,
+                    chunk_text,
+                ) in enumerate(
+                    zip(vectors, chunks)
+                ):
+
+                    chunk_hash = hashlib.sha256(
+                        chunk_text.encode("utf-8")
+                    ).hexdigest()
+
+                    cur.execute(
+                        """
+                        INSERT INTO source_article_chunks (
+                            source_article_id,
+                            chunk_index,
+                            content,
+                            content_hash,
+                            embedding,
+                            embedding_model
+                        )
+                        VALUES (%s, %s, %s, %s, %s::vector, %s)
+                        """,
+                        (
+                            article_id,
+                            idx,
+                            chunk_text,
+                            chunk_hash,
+                            pg_vector(vector),
+                            EMBEDDING_MODEL_NAME,
+                        ),
+                    )
 
                 processed += 1
 
@@ -248,7 +360,7 @@ with get_conn() as conn:
                 failed += 1
 
                 print(
-                    f"Embedding failed "
+                    f"Chunking failed "
                     f"for article {article_id}: "
                     f"{exc}"
                 )
@@ -257,7 +369,7 @@ with get_conn() as conn:
 
 
 print(
-    f"Embedded={processed}, "
+    f"Chunked={processed}, "
     f"failed={failed}"
 )
 

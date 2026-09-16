@@ -1,0 +1,19 @@
+resources:
+  jobs:
+    meczyki_ingest_and_embed:
+      name: meczyki-ingest-and-embed
+      schedule:
+        quartz_cron_expression: "0 0 * * * ?"
+        timezone_id: "Europe/Warsaw"
+      tasks:
+        - task_key: ingest
+          notebook_task:
+            notebook_path: ../notebooks/01_ingest
+          existing_cluster_id: ${var.cluster_id}
+
+        - task_key: embed
+          depends_on:
+            - task_key: ingest
+          notebook_task:
+            notebook_path: ../notebooks/02_embed
+          existing_cluster_id: ${var.cluster_id}

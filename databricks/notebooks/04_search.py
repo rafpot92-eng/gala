@@ -5,6 +5,9 @@
 # MAGIC
 # MAGIC Interactive semantic search over Meczyki source articles.
 # MAGIC
+# MAGIC Uses chunk-level retrieval with a cross-encoder reranker.
+# MAGIC Returns the best matching chunk per article.
+# MAGIC
 # MAGIC Parameters:
 # MAGIC
 # MAGIC     query
@@ -113,14 +116,10 @@ def pg_vector(values):
 
 # MAGIC %md
 # MAGIC ## Query embedding
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Query embedding
 # MAGIC
-# MAGIC Same `sentence-transformers` model as `02_embed.py` — they must
-# MAGIC match for vector similarity to work.
+# MAGIC Same `intfloat/multilingual-e5-large` model as `02_embed.py`
+# MAGIC — they must match. E5 requires a `query:` prefix for
+# MAGIC query-side embeddings.
 
 # COMMAND ----------
 
@@ -151,11 +150,14 @@ except OSError:
         "using ephemeral cluster cache."
     )
 
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import (
+    CrossEncoder,
+    SentenceTransformer,
+)
 
 
 EMBEDDING_MODEL_NAME = (
-    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    "intfloat/multilingual-e5-large"
 )
 
 QUERY_EMBEDDER = SentenceTransformer(
@@ -169,20 +171,24 @@ def embed_query(
 
     return [
         float(v)
-        for v in QUERY_EMBEDDER.encode(text)
+        for v in QUERY_EMBEDDER.encode(
+            f"query: {text}"
+        )
     ]
 
 
-query_vector = embed_query(
-    query
+RERANKER = CrossEncoder(
+    "BAAI/bge-reranker-v2-m3"
 )
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Semantic retrieval
+# MAGIC ## Chunk retrieval + rerank
 
 # COMMAND ----------
+
+query_vector = embed_query(query)
 
 with get_conn() as conn:
 
@@ -191,28 +197,93 @@ with get_conn() as conn:
         cur.execute(
             """
             SELECT
-                id,
-                title,
-                description,
-                canonical_url,
-                published_at,
+                c.id,
+                c.source_article_id,
+                c.chunk_index,
+                c.content,
+                s.title,
+                s.canonical_url,
+                s.published_at,
                 1 - (
-                    embedding <=> %s::vector
+                    c.embedding <=> %s::vector
                 ) AS similarity
-            FROM source_articles
-            WHERE embedding IS NOT NULL
+            FROM source_article_chunks c
+            JOIN source_articles s
+                ON s.id = c.source_article_id
+            WHERE c.embedding IS NOT NULL
             ORDER BY
-                embedding <=> %s::vector
-            LIMIT %s
+                c.embedding <=> %s::vector
+            LIMIT 50
             """,
             (
                 pg_vector(query_vector),
                 pg_vector(query_vector),
-                limit,
             ),
         )
 
-        rows = cur.fetchall()
+        candidates = cur.fetchall()
+
+
+# Rerank candidates with cross-encoder.
+
+if candidates:
+
+    pairs = [
+        (query, row[3])
+        for row in candidates
+    ]
+
+    scores = RERANKER.score(pairs)
+
+    reranked = [
+        (row, float(score))
+        for row, score in zip(
+            candidates, scores
+        )
+    ]
+
+    reranked.sort(
+        key=lambda x: x[1],
+        reverse=True,
+    )
+
+else:
+
+    reranked = []
+
+# Dedupe: keep best chunk per article.
+
+seen_articles = set()
+results = []
+
+for row, rerank_score in reranked:
+
+    article_id = row[1]
+
+    if article_id in seen_articles:
+
+        continue
+
+    seen_articles.add(article_id)
+
+    results.append(
+        {
+            "id": row[0],
+            "article_id": article_id,
+            "title": row[4],
+            "url": row[5],
+            "published_at": row[6],
+            "snippet": row[3][:300] + (
+                "..." if len(row[3]) > 300 else ""
+            ),
+            "similarity": float(row[7]),
+            "rerank_score": rerank_score,
+        }
+    )
+
+    if len(results) >= limit:
+
+        break
 
 # COMMAND ----------
 
@@ -221,47 +292,20 @@ with get_conn() as conn:
 
 # COMMAND ----------
 
-results = []
-
-for row in rows:
-
-    (
-        article_id,
-        title,
-        description,
-        url,
-        published_at,
-        similarity,
-    ) = row
-
-    results.append(
-        {
-            "id": article_id,
-            "title": title,
-            "description": description,
-            "url": url,
-            "published_at": published_at,
-            "similarity": float(
-                similarity
-            ),
-        }
-    )
-
-
 display(
-    spark.createDataFrame(
-        results
-    )
+    spark.createDataFrame(results)
     if results
     else spark.createDataFrame(
         [],
         """
         id long,
+        article_id long,
         title string,
-        description string,
         url string,
         published_at timestamp,
-        similarity double
+        snippet string,
+        similarity double,
+        rerank_score double
         """
     )
 )
@@ -284,6 +328,6 @@ print(
 for result in results:
 
     print(
-        f"{result['similarity']:.4f} "
+        f"{result['rerank_score']:.4f} "
         f"{result['title']}"
     )

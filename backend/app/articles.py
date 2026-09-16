@@ -414,6 +414,7 @@ def change_status(
     new_status,
     user,
     notes=None,
+    metadata=None,
 ):
 
     with get_connection() as conn:
@@ -503,6 +504,7 @@ def change_status(
         old_status=old_status,
         new_status=new_status,
         notes=notes,
+        metadata=metadata,
     )
 
     return get_article(article_id)
@@ -526,6 +528,29 @@ def send_to_review(
     )
 
 
+def _build_feedback_metadata(
+    payload,
+):
+
+    if not payload:
+
+        return None
+
+    meta = {}
+
+    if payload.quality_score is not None:
+
+        meta["quality_score"] = (
+            payload.quality_score
+        )
+
+    if payload.feedback:
+
+        meta["feedback"] = payload.feedback
+
+    return meta if meta else None
+
+
 @router.post("/{article_id}/reject")
 def reject_article(
     article_id: int,
@@ -540,7 +565,10 @@ def reject_article(
         article_id,
         "draft",
         user,
-        payload.notes if payload else None,
+        notes=payload.notes if payload else None,
+        metadata=_build_feedback_metadata(
+            payload
+        ),
     )
 
 
@@ -558,7 +586,10 @@ def approve_article(
         article_id,
         "approved",
         user,
-        payload.notes if payload else None,
+        notes=payload.notes if payload else None,
+        metadata=_build_feedback_metadata(
+            payload
+        ),
     )
 
 
@@ -575,5 +606,8 @@ def publish_article(
         article_id,
         "published",
         user,
-        payload.notes if payload else None,
+        notes=payload.notes if payload else None,
+        metadata=_build_feedback_metadata(
+            payload
+        ),
     )

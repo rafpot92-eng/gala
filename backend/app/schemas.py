@@ -28,6 +28,12 @@ class StatusChange(BaseModel):
 
     notes: str | None = None
 
+    quality_score: int | None = Field(
+        default=None, ge=1, le=5,
+    )
+
+    feedback: str | None = None
+
 
 class SearchRequest(BaseModel):
 

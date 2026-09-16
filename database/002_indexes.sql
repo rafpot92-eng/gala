@@ -22,6 +22,21 @@ ON source_articles(id)
 WHERE embedding IS NULL;
 
 
+-- ============================================================
+-- SOURCE ARTICLE CHUNKS (e5-large, 1024-dim retrieval)
+-- ============================================================
+
+CREATE INDEX IF NOT EXISTS
+idx_source_article_chunks_embedding
+ON source_article_chunks
+USING hnsw (embedding vector_cosine_ops);
+
+CREATE INDEX IF NOT EXISTS
+idx_source_article_chunks_source
+ON source_article_chunks(source_article_id);
+
+
+-- ============================================================
 -- Vector similarity search.
 --
 -- For now we use pgvector's HNSW index.

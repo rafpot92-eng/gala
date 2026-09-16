@@ -219,19 +219,27 @@ def _workspace_url():
 
     if "dbutils" in globals():
 
-        ctx = (
-            dbutils.notebook
-            .entry_point
-            .getDbutils()
-            .notebook()
-            .getContext()
-        )
+        # ponytail: workspaceUrl() was removed from the runtime
+        # context API; browserHostName tag is the fallback.
+        try:
 
-        host = ctx.workspaceUrl().get()
+            host = (
+                dbutils.notebook
+                .entry_point
+                .getDbutils()
+                .notebook()
+                .getContext()
+                .tags()
+                .apply("browserHostName")
+            )
 
-        if host:
+            if host:
 
-            return f"https://{host}"
+                return f"https://{host}"
+
+        except Exception:
+
+            pass
 
     return (
         "https://"
